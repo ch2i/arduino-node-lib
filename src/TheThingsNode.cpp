@@ -122,6 +122,11 @@ void TheThingsNode::loop()
       }
     }
   }
+  
+  // Check if INTERVAL has been achieved : USB mode
+  if (TTN_INTERVAL >= this->intervalMs) {
+    wakeStatus |= TTN_WAKE_INTERVAL;
+  }
 
   // We sure to be called only once when button still pressed
   // Button management will start only below this code
@@ -330,6 +335,7 @@ void TheThingsNode::showStatus()
 
 void TheThingsNode::configInterval(bool enabled, uint32_t ms)
 {
+  TTN_INTERVAL = 0; // reset for USB
   this->intervalMs = ms;
   this->pttn = NULL;
   this->intervalEnabled = enabled;
@@ -337,6 +343,7 @@ void TheThingsNode::configInterval(bool enabled, uint32_t ms)
 
 void TheThingsNode::configInterval(TheThingsNetwork *ttn, uint32_t ms)
 {
+  TTN_INTERVAL = 0; // reset for USB
   this->intervalMs = ms;
   this->pttn = ttn;
   this->intervalEnabled = true;
@@ -344,6 +351,7 @@ void TheThingsNode::configInterval(TheThingsNetwork *ttn, uint32_t ms)
 
 void TheThingsNode::configInterval(bool enabled)
 {
+  TTN_INTERVAL = 0; // reset for USB
   this->pttn = NULL;
   this->intervalEnabled = enabled;
 }
@@ -1055,7 +1063,7 @@ void TheThingsNode::WDT_stop()
   WDTCSR = 0 << WDP0 | 1 << WDP1 | 0 << WDP2 | 0 << WDP3;
   sei();
 
-  this->wdtStarted = true;
+  this->wdtStarted = false; // modif
 }
 
 void TheThingsNode::deepSleep(void)

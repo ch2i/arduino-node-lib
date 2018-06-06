@@ -32,6 +32,21 @@ CayenneLPP lpp(51);
 // Interval between send in seconds, so 300s = 5min
 #define CONFIG_INTERVAL ((uint32_t)300)
 
+// Timeout after stop moving in seconds to resend start motion
+#define MOVE_TIMEOUT ((uint32_t)30)
+
+// Force use MOVE INTERVAL after x times start detected before end MOVE_TIMEOUT (always moving object).
+#define MAX_NBSTART ((uint16_t)10)
+
+// Timeout after MAX_NBSTOP stop detected before end MOVE_TIMEOUT, in seconds to resend start motion
+#define MOVE_INTERVAL ((uint32_t)60)
+
+bool move_start = false;
+bool move_stop = false;
+bool move_timeout = false;
+bool use_move_interval = false;
+uint16_t nbstart_detect = 0;
+
 void sendData(uint8_t port=PORT_SETUP, uint32_t duration=0);
 
 void setup()
@@ -61,6 +76,7 @@ void setup()
   node->onInterval(interval);
   node->onSleep(sleep);
   node->onMotionStart(onMotionStart);
+  node->onMotionStop(onMotionStop);
   node->onButtonRelease(onButtonRelease);
 
   // Test sensors 
@@ -69,6 +85,9 @@ void setup()
   debugSerial.println("-- TTN: STATUS");
   ttn.showStatus();
 
+  // Each interval (with watchdog)
+  //node->configInterval(true, CONFIG_INTERVAL*1000); 
+  
   // Each interval (with Lora Module and Serial IRQ)
   // Take care this one need to be called after any
   // first call to ttn.* so object has been instancied
@@ -91,6 +110,16 @@ void setup()
   // node->configUSB(true);
 }
 
+void color_blink(ttn_color color, uint8_t count)
+{
+  for (uint8_t i=0 ; i<count ; i++) {
+    node->setColor(color);
+    delay(30);
+    node->setColor(TTN_BLACK);
+    delay(470);
+  }
+}
+
 void loop()
 {
   node->loop();
@@ -98,17 +127,49 @@ void loop()
 
 void interval(uint8_t wakeReason)
 {
-  debugSerial.print(F("-- SEND: INTERVAL 0x"));
-  debugSerial.print(wakeReason, HEX);
-  debugSerial.println(F("ms"));
-  sendData(PORT_INTERVAL);
+  if (wakeReason != 0)
+  {
+    debugSerial.print(F("-- SEND: INTERVAL 0x"));
+    debugSerial.print(wakeReason, HEX);
+    debugSerial.println(F("ms"));
+
+    if (move_timeout || use_move_interval)
+    {
+      // interval set after stop mouvement so reset to detect it after
+      color_blink(TTN_WHITE, 5);
+      
+      if (use_move_interval)
+      {
+        sendData(PORT_INTERVAL);
+        nbstart_detect = 0;
+        use_move_interval = false;
+      }
+
+      move_start = false;
+      move_stop = false;
+      move_timeout = false;
+      // Back to TTN interval
+      node->configInterval(&ttn, CONFIG_INTERVAL*1000);
+    }
+    else
+      sendData(PORT_INTERVAL);
+  }
 }
 
 void wake(uint8_t wakeReason)
 {
-  debugSerial.print(F("-- WAKE: 0x"));
-  debugSerial.println(wakeReason, HEX);
-  node->setColor(TTN_GREEN);
+  if (wakeReason != 0)
+  {
+    debugSerial.print(F("-- WAKE: 0x"));
+    debugSerial.println(wakeReason, HEX);
+
+    if (wakeReason & TTN_WAKE_WATCHDOG) {
+      debugSerial.print(F(" Watchdog"));
+      color_blink(TTN_YELLOW, 2);
+    }
+    else
+  	  node->setColor(TTN_GREEN);
+  }
 }
 
 void sleep()
@@ -120,17 +181,72 @@ void onMotionStart()
 {
   node->setColor(TTN_RED);
 
-  // This move has already been detected
-  // We need to detect stop motion before sending any new motion
-  // this avoid flooding network when the device is all time moving 
-  if (node->isMoving())
+  // Send First Move
+  // Then wait Stop Motion and End of Move Timeout To send next Motion receive
+  // this avoid flooding network when the device is all time moving
+  if (move_start || use_move_interval)
   {
-    debugSerial.print("-- STILL MOVING");
+    if (move_stop && !use_move_interval)
+	  {
+      nbstart_detect ++;
+      debugSerial.print(F("-- DETECT: NB START BEFORE TIMEOUT : "));
+      debugSerial.print(nbstart_detect);
+
+      if (nbstart_detect > MAX_NBSTART)
+      {
+        debugSerial.print("-- MAX NB STOP, USE MOVE INTERVAL");
+        // SET MOVE INTERVAL
+        use_move_interval = true;
+        node->configInterval(&ttn, MOVE_INTERVAL*1000);
+      }
+      else
+      {
+        move_stop = false;
+        move_timeout = false;
+  	    // Back to TTN interval with MOVE_INTERVAL
+        node->configInterval(&ttn, MOVE_INTERVAL*1000);
+      }
+	  }
+    else
+      move_start = true;
+  }
+  else {
+    nbstart_detect = 0;
+    move_start = true;
+    move_stop = false;
+    debugSerial.print("-- DETECT: MOTION START");
+    debugSerial.print("-- SEND: START MOTION");
+    sendData(PORT_MOTION);
+  }
+}
+
+void onMotionStop(unsigned long duration)
+{
+  if (move_start)
+  {
+    if (move_stop)
+    {
+      debugSerial.print("-- DETECT: STOP MOTION AFTER FIRST STOP ");
+      move_start = false;
+    }
+    else
+    {
+      debugSerial.print("-- DETECT: FIRST STOP MOTION");
+
+      node->setColor(TTN_CYAN);
+      move_stop = true;
+      move_timeout = true;
+      // SET MOVE TIMEOUT
+      node->configInterval(true, MOVE_TIMEOUT*1000);
+     }
   }
   else
   {
-    debugSerial.print("-- SEND: START MOTION");
-    sendData(PORT_MOTION);
+    move_stop = false;
+	  // Back to TTN interval
+    move_timeout = false;
+    // Back to TTN interval
+    node->configInterval(&ttn, CONFIG_INTERVAL*1000);
   }
 }
 
@@ -146,12 +262,7 @@ void onButtonRelease(unsigned long duration)
   if (timepressed > 2000) {
     // blink yellow led for 60 seconds
     // this will let us to upload new sketch if needed
-    for (uint8_t i=0 ; i<60 ; i++) {
-      node->setColor(TTN_YELLOW);
-      delay(30);
-      node->setColor(TTN_BLACK);
-      delay(470);
-    }
+    color_blink(TTN_YELLOW, 60);
   }
 
   // then send data
@@ -175,10 +286,11 @@ void sendData(uint8_t port, uint32_t duration)
 
   printSensors();
 
+
   lpp.reset();
   lpp.addDigitalInput(1, node->isButtonPressed());
   lpp.addDigitalInput(2, node->isUSBConnected());
-  lpp.addDigitalInput(3, node->isMoving());
+  lpp.addDigitalInput(3, move_start);
   lpp.addAnalogInput(4, bat/1000.0);
   lpp.addTemperature(5, node->getTemperatureAsFloat());
   lpp.addLuminosity(6, node->getLight());
